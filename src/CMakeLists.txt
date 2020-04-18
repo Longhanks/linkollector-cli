@@ -20,11 +20,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # clang and gcc don't default-print colored diagnostics when invoked from Ninja
-if(UNIX AND "${CMAKE_GENERATOR}" STREQUAL "Ninja" AND
+if("${CMAKE_GENERATOR}" STREQUAL "Ninja" AND
 ("${CMAKE_CXX_COMPILER_ID}" MATCHES "(Apple)?[Cc]lang" OR
 ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU" AND
         NOT (CMAKE_CXX_COMPILER_VERSION VERSION_LESS 4.9))))
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fdiagnostics-color")
+    if("${CMAKE_SYSTEM_NAME}" STREQUAL "Windows")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fansi-escape-codes")
+    endif()
 endif()
 
 # lld doesn't print colored diagnostics when invoked from Ninja
