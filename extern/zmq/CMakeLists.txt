@@ -1,0 +1,24 @@
+include(FetchContent)
+
+FetchContent_Declare(
+        zmq
+        GIT_REPOSITORY    git@github.com:zeromq/libzmq.git
+        GIT_TAG           v4.3.2
+)
+
+FetchContent_GetProperties(zmq)
+
+if(NOT zmq_POPULATED)
+    FetchContent_Populate(zmq)
+    set(BUILD_SHARED OFF CACHE INTERNAL "")
+    set(BUILD_STATIC ON CACHE INTERNAL "")
+    set(WITH_PERF_TOOL OFF CACHE INTERNAL "")
+    set(ZMQ_BUILD_TESTS OFF CACHE INTERNAL "")
+    set(ENABLE_CPACK OFF CACHE INTERNAL "")
+
+    if("${CMAKE_CXX_COMPILER_ID}" MATCHES "(Apple)?[Cc]lang")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /W0 /EHsc -Wno-unused-command-line-argument")
+    endif()
+
+    add_subdirectory(${zmq_SOURCE_DIR} ${zmq_BINARY_DIR})
+endif()
