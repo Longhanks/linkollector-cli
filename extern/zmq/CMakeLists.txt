@@ -20,5 +20,9 @@ if(NOT zmq_POPULATED)
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /W0 /EHsc -Wno-unused-command-line-argument")
     endif()
 
+    if("${CMAKE_SYSTEM_NAME}" STREQUAL "Darwin")
+        set(POLLER "kqueue" CACHE INTERNAL "")
+    endif()
+
     add_subdirectory(${zmq_SOURCE_DIR} ${zmq_BINARY_DIR})
 endif()
