@@ -16,8 +16,10 @@ if(NOT zmq_POPULATED)
     set(ZMQ_BUILD_TESTS OFF CACHE INTERNAL "")
     set(ENABLE_CPACK OFF CACHE INTERNAL "")
 
-    if("${CMAKE_CXX_COMPILER_ID}" MATCHES "(Apple)?[Cc]lang")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /W0 /EHsc -Wno-unused-command-line-argument")
+    if(MSVC)
+        if("${CMAKE_CXX_COMPILER_ID}" MATCHES "(Apple)?[Cc]lang")
+            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /W0 /EHsc")
+        endif()
     endif()
 
     if("${CMAKE_SYSTEM_NAME}" STREQUAL "Darwin")
