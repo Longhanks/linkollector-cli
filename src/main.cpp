@@ -105,7 +105,16 @@ int main(int argc, char *argv[]) {
         void *signal_socket = zmq_socket(context, ZMQ_PAIR);
         zmq_bind(signal_socket, "inproc://signal");
 
+#ifdef _WIN32
         std::signal(SIGINT, signal_handler);
+#else
+        struct sigaction action;
+        action.sa_handler = signal_handler;
+        action.sa_flags = 0;
+        sigemptyset(&action.sa_mask);
+        sigaction(SIGINT, &action, nullptr);
+        sigaction(SIGTERM, &action, nullptr);
+#endif
 
         void *worker_shutdown_socket = zmq_socket(context, ZMQ_PAIR);
         zmq_bind(worker_shutdown_socket, "inproc://worker_shutdown");
@@ -196,7 +205,7 @@ int main(int argc, char *argv[]) {
         std::cout << "Main thread clean shutdown\n";
     }
 
-    else if (arg1 == "-c") {
+    else if (arg1 == "-p") {
         if (argc < 3) {
             std::cerr << "Need a message to send\n";
             return EXIT_FAILURE;
