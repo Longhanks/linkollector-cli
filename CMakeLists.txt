@@ -55,7 +55,16 @@ if(MSVC)
     endif()
 endif()
 
-add_executable(${PROJECT_NAME} src/main.cpp)
+add_executable(${PROJECT_NAME}
+    src/wrappers/zmq/context.cpp
+    src/wrappers/zmq/poll.cpp
+    src/wrappers/zmq/poll_event.cpp
+    src/wrappers/zmq/poll_response.cpp
+    src/wrappers/zmq/poll_target.cpp
+    src/wrappers/zmq/socket.cpp
+    src/main.cpp
+    src/signal_helper.cpp
+)
 
 # Disable exceptions
 if(MSVC)
@@ -178,6 +187,8 @@ else()
 endif()
 
 add_subdirectory(extern)
+
+target_link_libraries(${PROJECT_NAME} PRIVATE GSL)
 
 target_link_libraries(${PROJECT_NAME} PUBLIC libzmq-static)
 get_target_property(ZMQ_INCLUDES_TO_SYSTEM libzmq-static INTERFACE_INCLUDE_DIRECTORIES)
