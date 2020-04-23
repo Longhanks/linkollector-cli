@@ -87,17 +87,19 @@ bool socket::connect(const std::string &endpoint) noexcept {
 }
 
 bool socket::blocking_send() noexcept {
-    return blocking_send(nullptr, 0);
+    return blocking_send({});
 }
 
-bool socket::blocking_send(const void *data, std::size_t size) noexcept {
-    if (data == nullptr) {
+bool socket::blocking_send(gsl::span<std::byte> message) noexcept {
+    if (message.empty()) {
         return zmq_send(this->m_socket, nullptr, 0, /* flags: */ 0) != -1;
     }
 
     zmq_msg_t msg;
-    zmq_msg_init_size(&msg, size);
-    std::memcpy(zmq_msg_data(&msg), data, size);
+    zmq_msg_init_size(&msg, message.size());
+    std::memcpy(zmq_msg_data(&msg),
+                static_cast<void *>(message.data()),
+                message.size());
 
     if (zmq_msg_send(&msg, this->m_socket, /* flags: */ 0) == -1) {
         zmq_msg_close(&msg);
@@ -118,8 +120,40 @@ std::optional<std::vector<std::byte>> socket::blocking_receive() noexcept {
 
     auto *data = static_cast<std::byte *>(zmq_msg_data(&msg));
 
-    std::vector<std::byte> buf(data, data + zmq_msg_size(&msg));
+    auto *data_end = data;
+    std::advance(data_end, zmq_msg_size(&msg));
+
+    std::vector<std::byte> buf(data, data_end);
     return {std::move(buf)};
+}
+
+bool socket::async_receive(void *data,
+                           void (*callback)(void *,
+                                            gsl::span<std::byte>)) noexcept {
+    zmq_msg_t msg;
+    zmq_msg_init(&msg);
+
+    const auto zmq_rc = zmq_msg_recv(&msg, this->m_socket, ZMQ_DONTWAIT);
+
+    if (zmq_rc == 0) {
+        // Success, but empty message
+        callback(data, {});
+        zmq_msg_close(&msg);
+        return true;
+    }
+
+    if (zmq_rc == -1) {
+        zmq_msg_close(&msg);
+
+        // If EAGAIN or EINTR, caller should try again
+        return errno == EAGAIN || errno == EINTR;
+    }
+
+    gsl::span<std::byte> buf(static_cast<std::byte *>(zmq_msg_data(&msg)),
+                             zmq_msg_size(&msg));
+    callback(data, buf);
+    zmq_msg_close(&msg);
+    return true;
 }
 
 } // namespace wrappers::zmq

@@ -1,123 +1,14 @@
-#include <array>
-#include <csignal>
 #include <cstdlib>
 #include <iostream>
+#include <string>
 #include <thread>
 
+#include "server.h"
 #include "signal_helper.h"
 #include "wrappers/zmq/context.h"
-#include "wrappers/zmq/poll.h"
 #include "wrappers/zmq/socket.h"
 
 #include <zmq.h>
-
-static void server_loop(wrappers::zmq::context &ctx) {
-    wrappers::zmq::socket tcp_responder_socket(
-        ctx, wrappers::zmq::socket::type::rep);
-    if (!tcp_responder_socket.bind("tcp://*:17729")) {
-        std::cerr << "Failed to bind the TCP responder socket\n";
-        return;
-    }
-
-    wrappers::zmq::socket worker_response_socket(
-        ctx, wrappers::zmq::socket::type::pair);
-    if (!worker_response_socket.bind("inproc://worker_response")) {
-        std::cerr << "Failed to bind the worker response socket\n";
-        return;
-    }
-
-    wrappers::zmq::socket worker_shutdown_socket(
-        ctx, wrappers::zmq::socket::type::pair);
-    if (!worker_shutdown_socket.connect("inproc://worker_shutdown")) {
-        std::cerr << "Failed to connect the worker shutdown socket\n";
-        return;
-    }
-
-    if (!worker_shutdown_socket.blocking_send()) {
-        std::cerr << "Failed to send data to the worker shutdown socket\n";
-        return;
-    }
-
-    std::array<wrappers::zmq::poll_target, 2> items = {
-        wrappers::zmq::poll_target(worker_shutdown_socket,
-                                   wrappers::zmq::poll_event::in),
-        wrappers::zmq::poll_target(tcp_responder_socket,
-                                   wrappers::zmq::poll_event::in),
-    };
-
-    bool break_loop = false;
-
-    while (!break_loop) {
-        auto maybe_responses = wrappers::zmq::blocking_poll(items);
-
-        if (!maybe_responses.has_value()) {
-            std::cerr << "Failure in zmq_poll, killing server...\n";
-            return;
-        }
-
-        const auto responses = std::move(*maybe_responses);
-
-        if (responses.empty()) {
-            continue;
-        }
-
-        for (const auto &response : responses) {
-            if (response.response_socket == &worker_shutdown_socket &&
-                response.response_event == wrappers::zmq::poll_event::in) {
-                const auto maybe_data =
-                    worker_shutdown_socket.blocking_receive();
-                if (!maybe_data.has_value()) {
-                    std::cerr << "Failed to receive answer from the worker "
-                                 "shutdown socket\n";
-                    return;
-                }
-                break_loop = true;
-                break;
-            }
-
-            if (response.response_socket == &tcp_responder_socket &&
-                response.response_event == wrappers::zmq::poll_event::in) {
-                zmq_msg_t message;
-                zmq_msg_init(&message);
-
-                // Use non-blocking so we can continue to check loop_connection
-                int rc = zmq_msg_recv(
-                    &message, tcp_responder_socket.get(), ZMQ_DONTWAIT);
-
-                if (rc < 0) {
-                    if (errno == EAGAIN) {
-                        continue;
-                    }
-                    if (errno == EINTR) {
-                        continue;
-                    }
-                    std::cerr
-                        << "Failure in zmq_msg_recv, killing server...\n";
-                    return;
-                }
-
-                if (!tcp_responder_socket.blocking_send()) {
-                    std::cerr
-                        << "Failed to send data to the TCP responder socket\n";
-                    return;
-                }
-
-                const bool send_result = worker_response_socket.blocking_send(
-                    zmq_msg_data(&message), zmq_msg_size(&message));
-
-                zmq_msg_close(&message);
-
-                if (!send_result) {
-                    std::cerr << "Failed to send data to the worker response "
-                                 "socket\n";
-                    return;
-                }
-            }
-        }
-    }
-
-    std::cout << "Worker thread clean shutdown\n";
-}
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
@@ -130,22 +21,18 @@ int main(int argc, char *argv[]) {
     if (arg1 == "-r") {
         wrappers::zmq::context ctx;
 
-        linkollector::signal_helper::static_data_guard
-            signal_static_data_guard(static_cast<void *>(&ctx));
+        linkollector::signal_helper::sigint_guard guard(
+            static_cast<void *>(&ctx), [](void *data) {
+                wrappers::zmq::context &ctx_ =
+                    *static_cast<wrappers::zmq::context *>(data);
+                wrappers::zmq::socket signal_socket(
+                    ctx_, wrappers::zmq::socket::type::pair);
 
-        const auto signal_handler = []([[maybe_unused]] int signal_value) {
-            wrappers::zmq::context &ctx_ =
-                *static_cast<wrappers::zmq::context *>(
-                    linkollector::signal_helper::static_data());
-
-            wrappers::zmq::socket signal_socket(
-                ctx_, wrappers::zmq::socket::type::pair);
-
-            if (signal_socket.connect("inproc://signal")) {
-                [[maybe_unused]] const bool result =
-                    signal_socket.blocking_send();
-            }
-        };
+                if (signal_socket.connect("inproc://signal")) {
+                    [[maybe_unused]] const bool result =
+                        signal_socket.blocking_send();
+                }
+            });
 
         wrappers::zmq::socket signal_socket(ctx,
                                             wrappers::zmq::socket::type::pair);
@@ -153,17 +40,6 @@ int main(int argc, char *argv[]) {
             std::cerr << "Failed to bind the SIGINT/SIGTERM socket\n";
             return EXIT_FAILURE;
         }
-
-#ifdef _WIN32
-        std::signal(SIGINT, signal_handler);
-#else
-        struct sigaction action;
-        action.sa_handler = signal_handler;
-        action.sa_flags = 0;
-        sigemptyset(&action.sa_mask);
-        sigaction(SIGINT, &action, nullptr);
-        sigaction(SIGTERM, &action, nullptr);
-#endif
 
         wrappers::zmq::socket worker_shutdown_socket(
             ctx, wrappers::zmq::socket::type::pair);
@@ -179,7 +55,7 @@ int main(int argc, char *argv[]) {
             return EXIT_FAILURE;
         }
 
-        std::thread server(server_loop, std::ref(ctx));
+        std::thread server(linkollector::server::loop, std::ref(ctx));
 
         // wait until server is ready
         const auto maybe_data = worker_shutdown_socket.blocking_receive();

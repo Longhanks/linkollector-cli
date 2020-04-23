@@ -45,11 +45,14 @@ public:
     [[nodiscard]] bool connect(const std::string &endpoint) noexcept;
 
     [[nodiscard]] bool blocking_send() noexcept;
-    [[nodiscard]] bool blocking_send(const void *data,
-                                     std::size_t size) noexcept;
+    [[nodiscard]] bool blocking_send(gsl::span<std::byte> message) noexcept;
 
     [[nodiscard]] std::optional<std::vector<std::byte>>
     blocking_receive() noexcept;
+
+    [[nodiscard]] bool
+    async_receive(void *data,
+                  void (*callback)(void *, gsl::span<std::byte>)) noexcept;
 
     [[deprecated]] [[nodiscard]] void *get() noexcept {
         return this->m_socket;
