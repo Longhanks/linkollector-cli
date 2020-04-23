@@ -193,5 +193,3 @@ target_link_libraries(${PROJECT_NAME} PRIVATE GSL)
 target_link_libraries(${PROJECT_NAME} PUBLIC libzmq-static)
 get_target_property(ZMQ_INCLUDES_TO_SYSTEM libzmq-static INTERFACE_INCLUDE_DIRECTORIES)
 target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE ${ZMQ_INCLUDES_TO_SYSTEM})
-
-

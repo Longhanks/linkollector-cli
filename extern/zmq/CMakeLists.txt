@@ -2,7 +2,7 @@ include(FetchContent)
 
 FetchContent_Declare(
         zmq
-        GIT_REPOSITORY    git@github.com:zeromq/libzmq.git
+        GIT_REPOSITORY    https://github.com/zeromq/libzmq
         GIT_TAG           v4.3.2
 )
 

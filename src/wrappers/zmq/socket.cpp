@@ -4,6 +4,8 @@
 
 #include <zmq.h>
 
+#include <cstring>
+
 namespace wrappers::zmq {
 
 [[nodiscard]] static constexpr decltype(ZMQ_PAIR)
