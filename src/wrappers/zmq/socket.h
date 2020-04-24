@@ -54,10 +54,6 @@ public:
     async_receive(void *data,
                   void (*callback)(void *, gsl::span<std::byte>)) noexcept;
 
-    [[deprecated]] [[nodiscard]] void *get() noexcept {
-        return this->m_socket;
-    }
-
     friend std::optional<std::vector<poll_response>>
     blocking_poll(gsl::span<poll_target> targets) noexcept;
 

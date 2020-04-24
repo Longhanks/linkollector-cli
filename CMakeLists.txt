@@ -63,7 +63,6 @@ add_executable(${PROJECT_NAME}
     src/wrappers/zmq/poll_target.cpp
     src/wrappers/zmq/socket.cpp
     src/main.cpp
-    src/server.cpp
     src/signal_helper.cpp
 )
 

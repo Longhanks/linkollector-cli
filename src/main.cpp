@@ -1,14 +1,14 @@
+#include <array>
 #include <cstdlib>
 #include <iostream>
 #include <string>
 #include <thread>
+#include <tuple>
 
-#include "server.h"
 #include "signal_helper.h"
 #include "wrappers/zmq/context.h"
+#include "wrappers/zmq/poll.h"
 #include "wrappers/zmq/socket.h"
-
-#include <zmq.h>
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
@@ -18,126 +18,125 @@ int main(int argc, char *argv[]) {
 
     std::string arg1(*std::next(argv));
 
+    wrappers::zmq::context ctx;
+
+    linkollector::signal_helper::sigint_guard guard(
+        static_cast<void *>(&ctx), [](void *data) {
+            wrappers::zmq::context &ctx_ =
+                *static_cast<wrappers::zmq::context *>(data);
+            wrappers::zmq::socket signal_socket(
+                ctx_, wrappers::zmq::socket::type::pair);
+
+            if (signal_socket.connect("inproc://signal")) {
+                [[maybe_unused]] const bool result =
+                    signal_socket.blocking_send();
+            }
+        });
+
+    wrappers::zmq::socket signal_socket(ctx,
+                                        wrappers::zmq::socket::type::pair);
+    if (!signal_socket.bind("inproc://signal")) {
+        std::cerr << "Failed to bind the SIGINT/SIGTERM socket\n";
+        return EXIT_FAILURE;
+    }
+
     if (arg1 == "-r") {
-        wrappers::zmq::context ctx;
-
-        linkollector::signal_helper::sigint_guard guard(
-            static_cast<void *>(&ctx), [](void *data) {
-                wrappers::zmq::context &ctx_ =
-                    *static_cast<wrappers::zmq::context *>(data);
-                wrappers::zmq::socket signal_socket(
-                    ctx_, wrappers::zmq::socket::type::pair);
-
-                if (signal_socket.connect("inproc://signal")) {
-                    [[maybe_unused]] const bool result =
-                        signal_socket.blocking_send();
-                }
-            });
-
-        wrappers::zmq::socket signal_socket(ctx,
-                                            wrappers::zmq::socket::type::pair);
-        if (!signal_socket.bind("inproc://signal")) {
-            std::cerr << "Failed to bind the SIGINT/SIGTERM socket\n";
-            return EXIT_FAILURE;
-        }
-
-        wrappers::zmq::socket worker_shutdown_socket(
-            ctx, wrappers::zmq::socket::type::pair);
-        if (!worker_shutdown_socket.bind("inproc://worker_shutdown")) {
-            std::cerr << "Failed to bind the worker shutdown socket\n";
-            return EXIT_FAILURE;
-        }
-
-        wrappers::zmq::socket worker_response_socket(
-            ctx, wrappers::zmq::socket::type::pair);
-        if (!worker_response_socket.connect("inproc://worker_response")) {
-            std::cerr << "Failed to connect the worker response socket\n";
-            return EXIT_FAILURE;
-        }
-
-        std::thread server(linkollector::server::loop, std::ref(ctx));
-
-        // wait until server is ready
-        const auto maybe_data = worker_shutdown_socket.blocking_receive();
-        if (!maybe_data.has_value()) {
-            std::cerr << "Failed to receive answer from the worker shutdown "
-                         "socket\n";
+        wrappers::zmq::socket tcp_responder_socket(
+            ctx, wrappers::zmq::socket::type::rep);
+        if (!tcp_responder_socket.bind("tcp://*:17729")) {
+            std::cerr << "Failed to bind the TCP responder socket\n";
             return EXIT_FAILURE;
         }
 
         std::cout << "Press CTRL+C to cancel..." << std::endl;
 
-        std::array<zmq_pollitem_t, 2> items = {
-            zmq_pollitem_t{signal_socket.get(), 0, ZMQ_POLLIN, 0},
-            zmq_pollitem_t{worker_response_socket.get(), 0, ZMQ_POLLIN, 0},
+        std::array<wrappers::zmq::poll_target, 2> items = {
+            wrappers::zmq::poll_target(signal_socket,
+                                       wrappers::zmq::poll_event::in),
+            wrappers::zmq::poll_target(tcp_responder_socket,
+                                       wrappers::zmq::poll_event::in),
         };
 
-        while (true) {
-            int rc =
-                zmq_poll(items.data(), static_cast<int>(items.size()), -1);
+        bool break_loop = false;
 
-            if (rc == 0) {
-                continue;
-            }
+        while (!break_loop) {
+            auto maybe_responses = wrappers::zmq::blocking_poll(items);
 
-            if (rc < 0) {
-                if (errno == EINTR) {
-                    continue;
-                }
+            if (!maybe_responses.has_value()) {
                 std::cerr << "Failure in zmq_poll, killing server...\n";
                 break;
             }
 
-            if ((items[0].revents > 0) &&
-                (static_cast<std::make_unsigned_t<decltype(items[0].revents)>>(
-                     items[0].revents) &
-                 static_cast<std::make_unsigned_t<decltype(ZMQ_POLLIN)>>(
-                     ZMQ_POLLIN)) > 0) {
-                if (!signal_socket.blocking_receive()) {
-                    std::cerr
-                        << "Failed to receive answer from signal socket\n";
-                }
-                break;
+            const auto responses = std::move(*maybe_responses);
+
+            if (responses.empty()) {
+                continue;
             }
 
-            if ((items[1].revents > 0) &&
-                (static_cast<std::make_unsigned_t<decltype(items[1].revents)>>(
-                     items[1].revents) &
-                 static_cast<std::make_unsigned_t<decltype(ZMQ_POLLIN)>>(
-                     ZMQ_POLLIN)) > 0) {
-                zmq_msg_t message;
-                zmq_msg_init(&message);
-
-                // Use non-blocking so we can continue to check
-                // signal_socket
-                rc = zmq_msg_recv(
-                    &message, worker_response_socket.get(), ZMQ_DONTWAIT);
-
-                if (rc < 0) {
-                    if (errno == EAGAIN) {
-                        continue;
+            for (const auto &response : responses) {
+                if (response.response_socket == &signal_socket &&
+                    response.response_event == wrappers::zmq::poll_event::in) {
+                    if (!signal_socket.blocking_receive()) {
+                        std::cerr
+                            << "Failed to receive answer from signal socket\n";
                     }
-                    if (errno == EINTR) {
-                        continue;
-                    }
-                    std::cerr
-                        << "Failure in zmq_msg_recv, killing server...\n";
+                    break_loop = true;
                     break;
                 }
 
-                std::string data(static_cast<char *>(zmq_msg_data(&message)),
-                                 zmq_msg_size(&message));
-                zmq_msg_close(&message);
-                std::cout << "Received \"" << data << "\" from client\n";
+                if (response.response_socket == &tcp_responder_socket &&
+                    response.response_event == wrappers::zmq::poll_event::in) {
+                    using payload_t = std::
+                        tuple<wrappers::zmq::socket &, std::string &, bool &>;
+
+                    std::string data;
+                    bool did_error;
+
+                    payload_t payload(tcp_responder_socket, data, did_error);
+
+                    const auto on_message = [](void *payload_,
+                                               gsl::span<std::byte> msg) {
+                        auto &[tcp_responder_socket_, data_, did_error_] =
+                            *static_cast<payload_t *>(payload_);
+
+                        if (!tcp_responder_socket_.blocking_send()) {
+                            std::cerr << "Failed to send data to the TCP "
+                                         "responder socket\n";
+                            did_error_ = true;
+                            return;
+                        }
+
+                        if (msg.empty()) {
+                            return;
+                        }
+
+                        auto *chars = static_cast<char *>(
+                            static_cast<void *>(msg.data()));
+                        data_ = std::string(chars, msg.size());
+                    };
+
+                    if (did_error) {
+                        break_loop = true;
+                        break;
+                    }
+
+                    if (!tcp_responder_socket.async_receive(
+                            static_cast<void *>(&payload), on_message)) {
+                        std::cerr
+                            << "Failure in zmq_msg_recv, killing server...\n";
+                        break_loop = true;
+                        break;
+                    }
+
+                    if (data.empty()) {
+                        std::cout << "Received empty message from client\n";
+                    } else {
+                        std::cout << "Received \"" << data
+                                  << "\" from client\n";
+                    }
+                }
             }
         }
-
-        if (!worker_shutdown_socket.blocking_send()) {
-            std::cerr << "Failed to send data to the worker shutdown socket\n";
-        }
-        server.join();
-
-        std::cout << "Main thread clean shutdown\n";
     }
 
     else if (arg1 == "-p") {
@@ -153,23 +152,71 @@ int main(int argc, char *argv[]) {
             return EXIT_FAILURE;
         }
 
+        wrappers::zmq::socket tcp_requester_socket(
+            ctx, wrappers::zmq::socket::type::req);
+        if (!tcp_requester_socket.connect("tcp://localhost:17729")) {
+            std::cerr << "Failed to connect the TCP requester socket\n";
+            return EXIT_FAILURE;
+        }
+
+        if (!tcp_requester_socket.blocking_send(
+                {static_cast<std::byte *>(static_cast<void *>(data.data())),
+                 data.size()})) {
+            std::cerr << "Failed to send data to the TCP requester socket\n";
+            return EXIT_FAILURE;
+        }
+
         std::cout << "Sending \"" << data << "\" to hello world server...\n";
 
-        void *context = zmq_ctx_new();
-        void *requester = zmq_socket(context, ZMQ_REQ);
-        zmq_connect(requester, "tcp://localhost:17729");
+        std::array<wrappers::zmq::poll_target, 2> items = {
+            wrappers::zmq::poll_target(signal_socket,
+                                       wrappers::zmq::poll_event::in),
+            wrappers::zmq::poll_target(tcp_requester_socket,
+                                       wrappers::zmq::poll_event::in),
+        };
 
-        zmq_msg_t message;
-        zmq_msg_init_data(&message,
-                          static_cast<void *>(data.data()),
-                          data.size(),
-                          nullptr,
-                          nullptr);
-        zmq_msg_send(&message, requester, 0);
-        zmq_recv(requester, nullptr, 0, 0);
+        bool break_loop = false;
 
-        zmq_close(requester);
-        zmq_ctx_destroy(context);
+        while (!break_loop) {
+            auto maybe_responses = wrappers::zmq::blocking_poll(items);
+
+            if (!maybe_responses.has_value()) {
+                std::cerr << "Failure in zmq_poll, killing client...\n";
+                break;
+            }
+
+            const auto responses = std::move(*maybe_responses);
+
+            if (responses.empty()) {
+                continue;
+            }
+
+            for (const auto &response : responses) {
+                if (response.response_socket == &signal_socket &&
+                    response.response_event == wrappers::zmq::poll_event::in) {
+
+                    if (!signal_socket.blocking_receive()) {
+                        std::cerr
+                            << "Failed to receive answer from signal socket\n";
+                    }
+                    break_loop = true;
+                    break;
+                }
+
+                if (response.response_socket == &tcp_requester_socket &&
+                    response.response_event == wrappers::zmq::poll_event::in) {
+
+                    if (!tcp_requester_socket.async_receive(nullptr,
+                                                            nullptr)) {
+                        std::cerr
+                            << "Failure in zmq_msg_recv, killing client...\n";
+                    }
+
+                    break_loop = true;
+                    break;
+                }
+            }
+        }
     }
 
     else {

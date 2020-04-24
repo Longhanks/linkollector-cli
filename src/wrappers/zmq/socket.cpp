@@ -51,7 +51,11 @@ to_zmq_socket_type(socket::type socket_type) {
 }
 
 socket::socket(context &ctx, type socket_type) noexcept
-    : m_socket(zmq_socket(ctx.m_context, to_zmq_socket_type(socket_type))) {}
+    : m_socket(zmq_socket(ctx.m_context, to_zmq_socket_type(socket_type))) {
+    constexpr const int no_linger = 0;
+    zmq_setsockopt(
+        this->m_socket, ZMQ_LINGER, &no_linger, sizeof(decltype(no_linger)));
+}
 
 socket::socket(socket &&other) noexcept {
     this->m_socket = other.m_socket;
@@ -137,7 +141,9 @@ bool socket::async_receive(void *data,
 
     if (zmq_rc == 0) {
         // Success, but empty message
-        callback(data, {});
+        if (callback != nullptr) {
+            callback(data, {});
+        }
         zmq_msg_close(&msg);
         return true;
     }
@@ -151,7 +157,9 @@ bool socket::async_receive(void *data,
 
     gsl::span<std::byte> buf(static_cast<std::byte *>(zmq_msg_data(&msg)),
                              zmq_msg_size(&msg));
-    callback(data, buf);
+    if (callback != nullptr) {
+        callback(data, buf);
+    }
     zmq_msg_close(&msg);
     return true;
 }
