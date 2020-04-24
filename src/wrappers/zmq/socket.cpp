@@ -125,7 +125,7 @@ std::optional<std::vector<std::byte>> socket::blocking_receive() noexcept {
     auto *data = static_cast<std::byte *>(zmq_msg_data(&msg));
 
     auto *data_end = data;
-    std::advance(data_end, zmq_msg_size(&msg));
+    std::advance(data_end, static_cast<std::ptrdiff_t>(zmq_msg_size(&msg)));
 
     std::vector<std::byte> buf(data, data_end);
     return {std::move(buf)};
