@@ -1,14 +1,180 @@
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <tuple>
 
+#include "macros.h"
 #include "signal_helper.h"
 #include "wrappers/zmq/context.h"
 #include "wrappers/zmq/poll.h"
 #include "wrappers/zmq/socket.h"
+
+#include <gsl/span>
+
+enum class activity { url, text };
+
+[[nodiscard]] static std::string
+activity_to_string(activity activity_) noexcept {
+    switch (activity_) {
+    case activity::url: {
+        return "URL";
+    }
+    case activity::text: {
+        return "TEXT";
+    }
+    }
+    LINKOLLECTOR_UNREACHABLE;
+}
+
+[[nodiscard]] static constexpr std::optional<activity>
+activity_from_string(const std::string_view activity_) noexcept {
+    if (activity_ == "URL") {
+        return activity::url;
+    }
+    if (activity_ == "TEXT") {
+        return activity::text;
+    }
+    return std::nullopt;
+}
+
+constexpr std::string_view activity_delimiter = "\uedfd";
+constexpr std::array<std::byte, activity_delimiter.size()>
+    activity_delimiter_bin = []() {
+        std::array<std::byte, activity_delimiter.size()> delim = {};
+        for (std::size_t i = 0; i < activity_delimiter.size(); ++i) {
+            delim.at(i) = static_cast<std::byte>(activity_delimiter[i]);
+        }
+        return delim;
+    }();
+
+static std::optional<std::pair<activity, std::string>>
+deserialize(gsl::span<std::byte> msg) noexcept {
+    const auto delimiter_begin =
+        std::search(std::begin(msg),
+                    std::end(msg),
+                    std::begin(activity_delimiter_bin),
+                    std::end(activity_delimiter_bin));
+
+    if (delimiter_begin == std::begin(msg) ||
+        delimiter_begin == std::end(msg)) {
+        return std::nullopt;
+    }
+
+    const auto delimiter_end = [&delimiter_begin]() {
+        auto begin_ = delimiter_begin;
+        std::advance(begin_, activity_delimiter.size());
+        return begin_;
+    }();
+
+    if (std::distance(delimiter_end, std::end(msg)) == 0) {
+        return std::nullopt;
+    }
+
+    const auto activity_string =
+        std::string(static_cast<char *>(static_cast<void *>(msg.data())),
+                    static_cast<std::size_t>(
+                        std::distance(std::begin(msg), delimiter_begin)));
+
+    auto maybe_activity = activity_from_string(activity_string);
+
+    if (!maybe_activity.has_value()) {
+        return std::nullopt;
+    }
+
+    auto activity_ = *maybe_activity;
+    auto string_ = std::string(
+        static_cast<char *>(static_cast<void *>(&(*delimiter_end))),
+        static_cast<std::size_t>(std::distance(delimiter_end, std::end(msg))));
+
+    return {std::make_pair(activity_, std::move(string_))};
+}
+
+#ifdef _WIN32
+
+#include <Windows.h>
+#include <shellapi.h>
+
+static void handle_url(const std::string &url) noexcept {
+    const int wide_char_characters =
+        ::MultiByteToWideChar(CP_UTF8, 0, url.c_str(), -1, nullptr, 0);
+
+    std::wstring out(static_cast<std::size_t>(wide_char_characters), L'\0');
+
+    ::MultiByteToWideChar(
+        CP_UTF8, 0, url.c_str(), -1, out.data(), wide_char_characters);
+
+    ::ShellExecuteW(
+        nullptr, nullptr, out.data(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+static constexpr const int window_name_max_size = 256;
+
+static void handle_text(const std::string &text) noexcept {
+    HWND notepad_window = nullptr;
+    STARTUPINFOW startupInfo{};
+    PROCESS_INFORMATION processInfo{};
+
+    std::wstring notepad_exe(L"notepad.exe");
+
+    if (::CreateProcessW(nullptr,
+                         notepad_exe.data(),
+                         nullptr,
+                         nullptr,
+                         FALSE,
+                         0,
+                         nullptr,
+                         nullptr,
+                         &startupInfo,
+                         &processInfo) > 0) {
+        ::WaitForInputIdle(processInfo.hProcess, INFINITE);
+
+        DWORD process_id = 0;
+        HWND window = ::GetWindow(::GetDesktopWindow(), GW_CHILD);
+        while (window != nullptr) {
+            DWORD thread_id = ::GetWindowThreadProcessId(window, &process_id);
+            if ((thread_id == processInfo.dwThreadId) &&
+                (process_id == processInfo.dwProcessId)) {
+                std::wstring class_name;
+                class_name.resize(window_name_max_size);
+
+                const auto actual_size =
+                    static_cast<std::size_t>(::GetClassNameW(
+                        window, class_name.data(), window_name_max_size));
+
+                class_name.resize(actual_size);
+
+                if (class_name == L"Notepad") {
+                    notepad_window = window;
+                    break;
+                }
+            }
+            window = ::GetWindow(window, GW_HWNDNEXT);
+        }
+    }
+
+    const int wide_char_characters =
+        ::MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+
+    std::wstring out(static_cast<std::size_t>(wide_char_characters), L'\0');
+
+    ::MultiByteToWideChar(
+        CP_UTF8, 0, text.c_str(), -1, out.data(), wide_char_characters);
+
+    auto *child = ::FindWindowExW(notepad_window, nullptr, L"Edit", nullptr);
+    ::SendMessageW(child, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(out.data()));
+}
+
+#else
+
+static void handle_url(const std::string &url) noexcept {}
+
+static void handle_text(const std::string &text) noexcept {}
+
+#endif
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
@@ -86,17 +252,22 @@ int main(int argc, char *argv[]) {
 
                 if (response.response_socket == &tcp_responder_socket &&
                     response.response_event == wrappers::zmq::poll_event::in) {
-                    using payload_t = std::
-                        tuple<wrappers::zmq::socket &, std::string &, bool &>;
+                    using payload_t = std::tuple<
+                        wrappers::zmq::socket &,
+                        std::optional<std::pair<activity, std::string>> &,
+                        bool &>;
 
-                    std::string data;
+                    std::optional<std::pair<activity, std::string>> maybe_data;
                     bool did_error;
 
-                    payload_t payload(tcp_responder_socket, data, did_error);
+                    payload_t payload(
+                        tcp_responder_socket, maybe_data, did_error);
 
                     const auto on_message = [](void *payload_,
                                                gsl::span<std::byte> msg) {
-                        auto &[tcp_responder_socket_, data_, did_error_] =
+                        auto &[tcp_responder_socket_,
+                               maybe_data_,
+                               did_error_] =
                             *static_cast<payload_t *>(payload_);
 
                         if (!tcp_responder_socket_.blocking_send()) {
@@ -110,9 +281,7 @@ int main(int argc, char *argv[]) {
                             return;
                         }
 
-                        auto *chars = static_cast<char *>(
-                            static_cast<void *>(msg.data()));
-                        data_ = std::string(chars, msg.size());
+                        maybe_data_ = deserialize(msg);
                     };
 
                     if (did_error) {
@@ -128,11 +297,25 @@ int main(int argc, char *argv[]) {
                         break;
                     }
 
-                    if (data.empty()) {
-                        std::cout << "Received empty message from client\n";
-                    } else {
-                        std::cout << "Received \"" << data
-                                  << "\" from client\n";
+                    if (!maybe_data.has_value()) {
+                        std::cout << "Could not parse message from client\n";
+                        continue;
+                    }
+
+                    auto data = std::move(*maybe_data);
+                    const auto activity_ = data.first;
+                    const auto string_ = std::move(data.second);
+
+                    switch (activity_) {
+                    case activity::text: {
+                        handle_text(string_);
+                        continue;
+
+                    case activity::url: {
+                        handle_url(string_);
+                        continue;
+                    }
+                    }
                     }
                 }
             }

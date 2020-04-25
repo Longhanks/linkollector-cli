@@ -1,5 +1,6 @@
 #include "socket.h"
 
+#include "../../macros.h"
 #include "context.h"
 
 #include <zmq.h>
@@ -48,6 +49,7 @@ to_zmq_socket_type(socket::type socket_type) {
         return ZMQ_STREAM;
     }
     }
+    LINKOLLECTOR_UNREACHABLE;
 }
 
 socket::socket(context &ctx, type socket_type) noexcept
