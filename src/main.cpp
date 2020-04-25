@@ -12,7 +12,7 @@
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        std::cerr << "Need -r or -p\n";
+        std::cerr << "Need -r or -s\n";
         return EXIT_FAILURE;
     }
 
@@ -139,13 +139,19 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    else if (arg1 == "-p") {
-        if (argc < 3) {
-            std::cerr << "Need a message to send\n";
+    else if (arg1 == "-s") {
+        if (argc < 4) {
+            std::cerr << "Need a server name and a message to send\n";
             return EXIT_FAILURE;
         }
 
-        std::string data(*std::next(argv, 2));
+        std::string server(*std::next(argv, 2));
+        std::string data(*std::next(argv, 3));
+
+        if (server.empty()) {
+            std::cerr << "Server cannot be empty\n";
+            return EXIT_FAILURE;
+        }
 
         if (data.empty()) {
             std::cerr << "Message cannot be empty\n";
@@ -154,7 +160,7 @@ int main(int argc, char *argv[]) {
 
         wrappers::zmq::socket tcp_requester_socket(
             ctx, wrappers::zmq::socket::type::req);
-        if (!tcp_requester_socket.connect("tcp://localhost:17729")) {
+        if (!tcp_requester_socket.connect("tcp://" + server + ":17729")) {
             std::cerr << "Failed to connect the TCP requester socket\n";
             return EXIT_FAILURE;
         }
