@@ -1,6 +1,7 @@
 #include "poll.h"
 
 #include "socket.h"
+#include "../../macros.h"
 
 #include <zmq.h>
 
@@ -18,6 +19,7 @@ to_zmq_event_type(poll_event event) {
         return ZMQ_POLLOUT;
     }
     }
+    LINKOLLECTOR_UNREACHABLE;
 }
 
 std::optional<std::vector<poll_response>>
