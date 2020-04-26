@@ -231,7 +231,7 @@ int main(int argc, char *argv[]) {
                     const auto string_ = std::move(data.second);
 
                     std::cout << "Received " << activity_to_string(activity_)
-                              << "\n:" << string_ << "\n";
+                              << ":\n" << string_ << "\n";
                 }
             }
         }
