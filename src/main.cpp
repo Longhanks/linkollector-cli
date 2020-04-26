@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -30,12 +31,18 @@ activity_to_string(activity activity_) noexcept {
     LINKOLLECTOR_UNREACHABLE;
 }
 
-[[nodiscard]] static constexpr std::optional<activity>
+[[nodiscard]] static std::optional<activity>
 activity_from_string(const std::string_view activity_) noexcept {
-    if (activity_ == "URL") {
+    std::string lowercase_activity;
+    std::transform(
+        std::begin(activity_),
+        std::end(activity_),
+        std::back_inserter(lowercase_activity),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (lowercase_activity == "url") {
         return activity::url;
     }
-    if (activity_ == "TEXT") {
+    if (lowercase_activity == "text") {
         return activity::text;
     }
     return std::nullopt;
@@ -92,89 +99,6 @@ deserialize(gsl::span<std::byte> msg) noexcept {
 
     return {std::make_pair(activity_, std::move(string_))};
 }
-
-#ifdef _WIN32
-
-#include <Windows.h>
-#include <shellapi.h>
-
-static void handle_url(const std::string &url) noexcept {
-    const int wide_char_characters =
-        ::MultiByteToWideChar(CP_UTF8, 0, url.c_str(), -1, nullptr, 0);
-
-    std::wstring out(static_cast<std::size_t>(wide_char_characters), L'\0');
-
-    ::MultiByteToWideChar(
-        CP_UTF8, 0, url.c_str(), -1, out.data(), wide_char_characters);
-
-    ::ShellExecuteW(
-        nullptr, nullptr, out.data(), nullptr, nullptr, SW_SHOWNORMAL);
-}
-
-static constexpr const int window_name_max_size = 256;
-
-static void handle_text(const std::string &text) noexcept {
-    HWND notepad_window = nullptr;
-    STARTUPINFOW startupInfo{};
-    PROCESS_INFORMATION processInfo{};
-
-    std::wstring notepad_exe(L"notepad.exe");
-
-    if (::CreateProcessW(nullptr,
-                         notepad_exe.data(),
-                         nullptr,
-                         nullptr,
-                         FALSE,
-                         0,
-                         nullptr,
-                         nullptr,
-                         &startupInfo,
-                         &processInfo) > 0) {
-        ::WaitForInputIdle(processInfo.hProcess, INFINITE);
-
-        DWORD process_id = 0;
-        HWND window = ::GetWindow(::GetDesktopWindow(), GW_CHILD);
-        while (window != nullptr) {
-            DWORD thread_id = ::GetWindowThreadProcessId(window, &process_id);
-            if ((thread_id == processInfo.dwThreadId) &&
-                (process_id == processInfo.dwProcessId)) {
-                std::wstring class_name;
-                class_name.resize(window_name_max_size);
-
-                const auto actual_size =
-                    static_cast<std::size_t>(::GetClassNameW(
-                        window, class_name.data(), window_name_max_size));
-
-                class_name.resize(actual_size);
-
-                if (class_name == L"Notepad") {
-                    notepad_window = window;
-                    break;
-                }
-            }
-            window = ::GetWindow(window, GW_HWNDNEXT);
-        }
-    }
-
-    const int wide_char_characters =
-        ::MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
-
-    std::wstring out(static_cast<std::size_t>(wide_char_characters), L'\0');
-
-    ::MultiByteToWideChar(
-        CP_UTF8, 0, text.c_str(), -1, out.data(), wide_char_characters);
-
-    auto *child = ::FindWindowExW(notepad_window, nullptr, L"Edit", nullptr);
-    ::SendMessageW(child, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(out.data()));
-}
-
-#else
-
-static void handle_url(const std::string &url) noexcept {}
-
-static void handle_text(const std::string &text) noexcept {}
-
-#endif
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
@@ -258,7 +182,7 @@ int main(int argc, char *argv[]) {
                         bool &>;
 
                     std::optional<std::pair<activity, std::string>> maybe_data;
-                    bool did_error;
+                    bool did_error = false;
 
                     payload_t payload(
                         tcp_responder_socket, maybe_data, did_error);
@@ -306,37 +230,35 @@ int main(int argc, char *argv[]) {
                     const auto activity_ = data.first;
                     const auto string_ = std::move(data.second);
 
-                    switch (activity_) {
-                    case activity::text: {
-                        handle_text(string_);
-                        continue;
-
-                    case activity::url: {
-                        handle_url(string_);
-                        continue;
-                    }
-                    }
-                    }
+                    std::cout << "Received " << activity_to_string(activity_)
+                              << "\n:" << string_ << "\n";
                 }
             }
         }
     }
 
     else if (arg1 == "-s") {
-        if (argc < 4) {
-            std::cerr << "Need a server name and a message to send\n";
+        if (argc < 5) {
+            std::cerr << "Need a server name, a message type (url or text) "
+                         "and a message to send\n";
             return EXIT_FAILURE;
         }
 
         std::string server(*std::next(argv, 2));
-        std::string data(*std::next(argv, 3));
+        auto maybe_activity = activity_from_string(*std::next(argv, 3));
+        std::string message(*std::next(argv, 4));
 
         if (server.empty()) {
             std::cerr << "Server cannot be empty\n";
             return EXIT_FAILURE;
         }
 
-        if (data.empty()) {
+        if (!maybe_activity.has_value()) {
+            std::cerr << "Message type must be url or text\n";
+            return EXIT_FAILURE;
+        }
+
+        if (message.empty()) {
             std::cerr << "Message cannot be empty\n";
             return EXIT_FAILURE;
         }
@@ -348,6 +270,11 @@ int main(int argc, char *argv[]) {
             return EXIT_FAILURE;
         }
 
+        std::string data;
+        data += activity_to_string(*maybe_activity);
+        data += activity_delimiter;
+        data += message;
+
         if (!tcp_requester_socket.blocking_send(
                 {static_cast<std::byte *>(static_cast<void *>(data.data())),
                  data.size()})) {
@@ -355,7 +282,8 @@ int main(int argc, char *argv[]) {
             return EXIT_FAILURE;
         }
 
-        std::cout << "Sending \"" << data << "\" to hello world server...\n";
+        std::cout << "Sending " << activity_to_string(*maybe_activity) << " \""
+                  << message << "\" to hello world server...\n";
 
         std::array<wrappers::zmq::poll_target, 2> items = {
             wrappers::zmq::poll_target(signal_socket,
